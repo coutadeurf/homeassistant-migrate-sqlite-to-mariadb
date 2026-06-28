@@ -9,6 +9,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # === ARGUMENTS =================================================
+SKIP_TABLE_CREATION=false
 SQLITE_DB="${1:-}"
 MYSQL_HOST="${2:-}"
 MYSQL_USER="${3:-}"
@@ -21,10 +22,17 @@ FORCE_MODE=false
 # ===============================================================
 
 # === VALIDATION ================================================
+# Check for --skip-table-creation flag
+if [[ "$1" == "--skip-table-creation" ]]; then
+  SKIP_TABLE_CREATION=true
+  shift
+fi
+
 if [[ -z "$SQLITE_DB" || -z "$MYSQL_HOST" || -z "$MYSQL_USER" || -z "$MYSQL_DB" ]]; then
-  echo "Usage: $0 <sqlite_db> <mysql_host> <mysql_user> <mysql_password|env> <mysql_db>"
+  echo "Usage: $0 [--skip-table-creation] <sqlite_db> <mysql_host> <mysql_user> <mysql_password|env> <mysql_db>"
   echo "Example:"
-  echo "  MYSQL_PWD=secret ./sqlite_to_mariadb.sh home-assistant_v2.db 192.168.1.2 homeassistant secret homeassistant"
+  echo "  MYSQL_PWD=secret ./migrate-ha-sqlit-db-to-mysql.sh home-assistant_v2.db 192.168.1.2 homeassistant secret homeassistant"
+  echo "  MYSQL_PWD=secret ./migrate-ha-sqlit-db-to-mysql.sh --skip-table-creation home-assistant_v2.db 192.168.1.2 homeassistant secret homeassistant"
   exit 1
 fi
 
@@ -41,6 +49,7 @@ echo " SQLite → MariaDB Migration Tool"
 echo "-----------------------------------------------------"
 echo " Source DB: $SQLITE_DB"
 echo " Target DB: $MYSQL_DB on $MYSQL_HOST (user: $MYSQL_USER)"
+echo " Skip table creation: $SKIP_TABLE_CREATION"
 echo "====================================================="
 
 # === STEP 1: discover tables ===================================
@@ -91,81 +100,85 @@ migrate_table() {
   echo "[*] Exporting to CSV..."
   sqlite3 -csv -header "$SQLITE_DB" "SELECT * FROM \"$TABLE\";" > "$csv"
 
-  # Generate CREATE TABLE SQL
-  CREATE_SQL=$(sqlite3 "$SQLITE_DB" ".schema $TABLE" |
-  awk '
-    BEGIN { IGNORECASE=1 }
-    /^CREATE TABLE/ { in_table=1 }
-    in_table && /^);/ {
-      print ") CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
-      in_table=0
-      next
-    }
-    {
-      # Replace any TEXT/LONGTEXT/BLOB column used in keys with VARCHAR(255)
-      gsub(/\bLONGTEXT\b/, "VARCHAR(255)")
-      gsub(/\bTEXT\b/, "VARCHAR(255)")
-      gsub(/\bBLOB\b/, "TINYBLOB")
-      print
-    }
-  ')
+  if [[ "$SKIP_TABLE_CREATION" == "false" ]]; then
+    # Generate CREATE TABLE SQL
+    CREATE_SQL=$(sqlite3 "$SQLITE_DB" ".schema $TABLE" |
+    awk '
+      BEGIN { IGNORECASE=1 }
+      /^CREATE TABLE/ { in_table=1 }
+      in_table && /^);/ {
+        print ") CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
+        in_table=0
+        next
+      }
+      {
+        # Replace any TEXT/LONGTEXT/BLOB column used in keys with VARCHAR(255)
+        gsub(/\bLONGTEXT\b/, "VARCHAR(255)")
+        gsub(/\bTEXT\b/, "VARCHAR(255)")
+        gsub(/\bBLOB\b/, "TINYBLOB")
+        print
+      }
+    ')
 
 
-  # --- normalize schema for MariaDB ----------------------------
-  CREATE_SQL=$(echo "$CREATE_SQL" | \
-    sed -E 's/IF NOT EXISTS//Ig' | \
-    sed -E 's/REAL/DOUBLE PRECISION/Ig' | \
-    sed -E 's/DOUBLE/DOUBLE PRECISION/Ig' | \
-    sed -E 's/FLOAT/DOUBLE PRECISION/Ig' | \
-    sed -E 's/NUMERIC/DOUBLE PRECISION/Ig' | \
-    sed -E 's/AUTOINCREMENT/AUTO_INCREMENT/Ig' | \
-    sed -E "s/INTEGER/BIGINT/Ig" | \
-    sed -E 's/DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/Ig' | \
-    sed -E 's/DEFAULT CURRENT_TIMESTAMP/CURRENT_TIMESTAMP/Ig')
+    # --- normalize schema for MariaDB ----------------------------
+    CREATE_SQL=$(echo "$CREATE_SQL" | \
+      sed -E 's/IF NOT EXISTS//Ig' | \
+      sed -E 's/REAL/DOUBLE PRECISION/Ig' | \
+      sed -E 's/DOUBLE/DOUBLE PRECISION/Ig' | \
+      sed -E 's/FLOAT/DOUBLE PRECISION/Ig' | \
+      sed -E 's/NUMERIC/DOUBLE PRECISION/Ig' | \
+      sed -E 's/AUTOINCREMENT/AUTO_INCREMENT/Ig' | \
+      sed -E "s/INTEGER/BIGINT/Ig" | \
+      sed -E 's/DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/Ig' | \
+      sed -E 's/DEFAULT CURRENT_TIMESTAMP/CURRENT_TIMESTAMP/Ig')
 
-  # Fix known large JSON columns
-  if [[ "$TABLE" == "state_attributes" ]]; then
-    CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/`shared_data`[^,]*/`shared_data` LONGTEXT/')
-  fi
+    # Fix known large JSON columns
+    if [[ "$TABLE" == "state_attributes" ]]; then
+      CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/`shared_data`[^,]*/`shared_data` LONGTEXT/')
+    fi
 
-  # Fix backticks
-  CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/"([^"]+)"/`\1`/g')
+    # Fix backticks
+    CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/"([^"]+)"/`\1`/g')
 
-  # Drop and recreate
-  echo "[*] Recreating table in MariaDB..."
-  mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" \
-    "$MYSQL_DB" --default-character-set="$CHARSET" -e "
-      SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0;
-      DROP TABLE IF EXISTS \`$TABLE\`;
-      $CREATE_SQL
-      SET FOREIGN_KEY_CHECKS=1; SET UNIQUE_CHECKS=1;
-    "
+    # Drop and recreate
+    echo "[*] Recreating table in MariaDB..."
+    mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" \
+      "$MYSQL_DB" --default-character-set="$CHARSET" -e "
+        SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0;
+        DROP TABLE IF EXISTS \`$TABLE\`;
+        $CREATE_SQL
+        SET FOREIGN_KEY_CHECKS=1; SET UNIQUE_CHECKS=1;
+      "
 
-  # Fix auto-increment on primary key integer fields
-  ALTER_SQL=$(mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" \
-      --batch --skip-column-names "$MYSQL_DB" -e "
-      SELECT CONCAT(
-        'ALTER TABLE \`', table_name, '\` MODIFY COLUMN \`', column_name, '\` ',
-        column_type, ' AUTO_INCREMENT;'
-      )
-      FROM information_schema.columns
-      WHERE table_schema = DATABASE()
-        AND table_name = '$TABLE'
-        AND column_key = 'PRI'
-        AND extra NOT LIKE '%auto_increment%'
-        AND data_type IN ('int','bigint','mediumint','smallint','tinyint');
-  ")
+    # Fix auto-increment on primary key integer fields
+    ALTER_SQL=$(mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" \
+        --batch --skip-column-names "$MYSQL_DB" -e "
+        SELECT CONCAT(
+          'ALTER TABLE \`', table_name, '\` MODIFY COLUMN \`', column_name, '\` ',
+          column_type, ' AUTO_INCREMENT;'
+        )
+        FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+          AND table_name = '$TABLE'
+          AND column_key = 'PRI'
+          AND extra NOT LIKE '%auto_increment%'
+          AND data_type IN ('int','bigint','mediumint','smallint','tinyint');
+    ")
 
-  if [[ -n "$ALTER_SQL" ]]; then
-    echo "[*] Adding AUTO_INCREMENT to primary key(s)..."
-    echo "$ALTER_SQL" | mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB"
-  fi
+    if [[ -n "$ALTER_SQL" ]]; then
+      echo "[*] Adding AUTO_INCREMENT to primary key(s)..."
+      echo "$ALTER_SQL" | mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB"
+    fi
 
-  # Specific fix for Home Assistant statistics_meta.shared_data
-  if [[ "$TABLE" == "statistics_meta" ]]; then
-    echo "[*] Ensuring shared_data is LONGTEXT..."
-    mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB" \
-      -e "ALTER TABLE statistics_meta MODIFY COLUMN shared_data LONGTEXT;"
+    # Specific fix for Home Assistant statistics_meta.shared_data
+    if [[ "$TABLE" == "statistics_meta" ]]; then
+      echo "[*] Ensuring shared_data is LONGTEXT..."
+      mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB" \
+        -e "ALTER TABLE statistics_meta MODIFY COLUMN shared_data LONGTEXT;"
+    fi
+  else
+    echo "[*] Skipping table creation (using existing table)."
   fi
 
   # Import data
@@ -187,7 +200,7 @@ migrate_table() {
 }
 
 export -f migrate_table
-export SQLITE_DB MYSQL_HOST MYSQL_USER MYSQL_DB MYSQL_PWD CHARSET CSV_DIR
+export SQLITE_DB MYSQL_HOST MYSQL_USER MYSQL_DB MYSQL_PWD CHARSET CSV_DIR SKIP_TABLE_CREATION
 
 echo ""
 echo "[+] Starting parallel migration..."
