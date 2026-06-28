@@ -105,7 +105,7 @@ migrate_table() {
       # Replace any TEXT/LONGTEXT/BLOB column used in keys with VARCHAR(255)
       gsub(/\bLONGTEXT\b/, "VARCHAR(255)")
       gsub(/\bTEXT\b/, "VARCHAR(255)")
-      gsub(/\bBLOB\b/, "VARBINARY(255)")
+      gsub(/\bBLOB\b/, "TINYBLOB")
       print
     }
   ')
@@ -119,6 +119,7 @@ migrate_table() {
     sed -E 's/FLOAT/DOUBLE PRECISION/Ig' | \
     sed -E 's/NUMERIC/DOUBLE PRECISION/Ig' | \
     sed -E 's/AUTOINCREMENT/AUTO_INCREMENT/Ig' | \
+    sed -E "s/INTEGER/BIGINT/Ig" | \
     sed -E 's/DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/Ig' | \
     sed -E 's/DEFAULT CURRENT_TIMESTAMP/CURRENT_TIMESTAMP/Ig')
 
