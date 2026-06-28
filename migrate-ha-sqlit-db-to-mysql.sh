@@ -125,7 +125,7 @@ migrate_table() {
 
   # Fix known large JSON columns
   if [[ "$TABLE" == "state_attributes" ]]; then
-    CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/`shared_attrs`[^,]*/`shared_attrs` LONGTEXT/')
+    CREATE_SQL=$(echo "$CREATE_SQL" | sed -E 's/`shared_data`[^,]*/`shared_data` LONGTEXT/')
   fi
 
   # Fix backticks
@@ -161,11 +161,11 @@ migrate_table() {
     echo "$ALTER_SQL" | mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB"
   fi
 
-  # Specific fix for Home Assistant statistics_meta.shared_attrs
+  # Specific fix for Home Assistant statistics_meta.shared_data
   if [[ "$TABLE" == "statistics_meta" ]]; then
-    echo "[*] Ensuring shared_attrs is LONGTEXT..."
+    echo "[*] Ensuring shared_data is LONGTEXT..."
     mariadb --host="$MYSQL_HOST" --user="$MYSQL_USER" --password="$MYSQL_PWD" "$MYSQL_DB" \
-      -e "ALTER TABLE statistics_meta MODIFY COLUMN shared_attrs LONGTEXT;"
+      -e "ALTER TABLE statistics_meta MODIFY COLUMN shared_data LONGTEXT;"
   fi
 
   # Import data
