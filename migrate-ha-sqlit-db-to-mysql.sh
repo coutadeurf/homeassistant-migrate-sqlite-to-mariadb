@@ -97,7 +97,7 @@ migrate_table() {
     BEGIN { IGNORECASE=1 }
     /^CREATE TABLE/ { in_table=1 }
     in_table && /^);/ {
-      print ") CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+      print ") CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
       in_table=0
       next
     }
